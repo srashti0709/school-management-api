@@ -1,116 +1,143 @@
 const express = require("express");
 const bodyParser = require("body-parser");
-const mysql = require("mysql2");
+const { Pool } = require("pg");
 const cors = require("cors");
 
 const app = express();
+
 app.use(cors());
 app.use(bodyParser.json());
 
-const db = mysql.createConnection({
-    host: "localhost",
-    user: "root",
-    password: "", // put your MySQL password here
-    database: "school_management"
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: {
+    rejectUnauthorized: false,
+  },
 });
 
-db.connect((err) => {
-    if (err) {
-        console.log("Database connection failed:", err);
-    } else {
-        console.log("Connected to MySQL");
-    }
-});
+// Test DB connection
+pool.connect()
+  .then(() => {
+    console.log("Connected to PostgreSQL");
+  })
+  .catch((err) => {
+    console.log("Database connection failed:", err);
+  });
 
-app.post("/addSchool", (req, res) => {
-    const { name, address, latitude, longitude } = req.body;
 
-    // ✅ Validation
-    if (!name || !address || latitude === undefined || longitude === undefined) {
-        return res.status(400).json({ message: "All fields are required" });
-    }
+// ================= ADD SCHOOL =================
 
-    if (typeof name !== "string" || typeof address !== "string") {
-        return res.status(400).json({ message: "Name and address must be strings" });
-    }
+app.post("/addSchool", async (req, res) => {
+  const { name, address, latitude, longitude } = req.body;
 
-    if (isNaN(latitude) || isNaN(longitude)) {
-        return res.status(400).json({ message: "Latitude and longitude must be numbers" });
-    }
+  // Validation
+  if (!name || !address || latitude === undefined || longitude === undefined) {
+    return res.status(400).json({
+      message: "All fields are required",
+    });
+  }
 
-    // ✅ Insert into DB
+  try {
     const query = `
-        INSERT INTO schools (name, address, latitude, longitude)
-        VALUES (?, ?, ?, ?)
+      INSERT INTO schools (name, address, latitude, longitude)
+      VALUES ($1, $2, $3, $4)
+      RETURNING id
     `;
 
-    db.query(query, [name, address, latitude, longitude], (err, result) => {
-        if (err) {
-            return res.status(500).json({ message: "Database error", error: err });
-        }
+    const values = [name, address, latitude, longitude];
 
-        res.status(201).json({
-            message: "School added successfully",
-            schoolId: result.insertId
-        });
+    const result = await pool.query(query, values);
+
+    res.status(201).json({
+      message: "School added successfully",
+      schoolId: result.rows[0].id,
     });
+
+  } catch (err) {
+    console.log(err);
+
+    res.status(500).json({
+      message: "Database error",
+      error: err.message,
+    });
+  }
 });
 
-app.get("/listSchools", (req, res) => {
-    const { latitude, longitude } = req.query;
 
-    // ✅ Validation
-    if (latitude === undefined || longitude === undefined) {
-        return res.status(400).json({ message: "Latitude and longitude are required" });
-    }
+// ================= LIST SCHOOLS =================
 
-    if (isNaN(latitude) || isNaN(longitude)) {
-        return res.status(400).json({ message: "Latitude and longitude must be numbers" });
-    }
+app.get("/listSchools", async (req, res) => {
+  const { latitude, longitude } = req.query;
 
-    // ✅ Fetch all schools
-    const query = "SELECT * FROM schools";
-
-    db.query(query, (err, results) => {
-        if (err) {
-            return res.status(500).json({ message: "Database error" });
-        }
-
-        // 🔥 Haversine Formula (distance calculation)
-        const getDistance = (lat1, lon1, lat2, lon2) => {
-            const R = 6371; // Earth radius in km
-            const dLat = (lat2 - lat1) * Math.PI / 180;
-            const dLon = (lon2 - lon1) * Math.PI / 180;
-
-            const a =
-                Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-                Math.cos(lat1 * Math.PI / 180) *
-                Math.cos(lat2 * Math.PI / 180) *
-                Math.sin(dLon / 2) * Math.sin(dLon / 2);
-
-            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-            return R * c;
-        };
-
-        // ✅ Add distance to each school
-        const schoolsWithDistance = results.map((school) => {
-            const distance = getDistance(
-                parseFloat(latitude),
-                parseFloat(longitude),
-                school.latitude,
-                school.longitude
-            );
-
-            return { ...school, distance: distance.toFixed(2) };
-        });
-
-        // ✅ Sort by distance
-        schoolsWithDistance.sort((a, b) => a.distance - b.distance);
-
-        res.json(schoolsWithDistance);
+  if (latitude === undefined || longitude === undefined) {
+    return res.status(400).json({
+      message: "Latitude and longitude are required",
     });
+  }
+
+  try {
+    const result = await pool.query("SELECT * FROM schools");
+
+    const schools = result.rows;
+
+    // Haversine Formula
+    const getDistance = (lat1, lon1, lat2, lon2) => {
+      const R = 6371;
+
+      const dLat = (lat2 - lat1) * Math.PI / 180;
+      const dLon = (lon2 - lon1) * Math.PI / 180;
+
+      const a =
+        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos(lat1 * Math.PI / 180) *
+        Math.cos(lat2 * Math.PI / 180) *
+        Math.sin(dLon / 2) * Math.sin(dLon / 2);
+
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+      return R * c;
+    };
+
+    const schoolsWithDistance = schools.map((school) => {
+      const distance = getDistance(
+        parseFloat(latitude),
+        parseFloat(longitude),
+        parseFloat(school.latitude),
+        parseFloat(school.longitude)
+      );
+
+      return {
+        ...school,
+        distance: distance.toFixed(2),
+      };
+    });
+
+    schoolsWithDistance.sort((a, b) => a.distance - b.distance);
+
+    res.json(schoolsWithDistance);
+
+  } catch (err) {
+    console.log(err);
+
+    res.status(500).json({
+      message: "Database error",
+      error: err.message,
+    });
+  }
 });
 
-app.listen(3000, () => {
-    console.log("Server running on port 3000");
+
+// ================= ROOT =================
+
+app.get("/", (req, res) => {
+  res.send("Server running");
+});
+
+
+// ================= PORT =================
+
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });
